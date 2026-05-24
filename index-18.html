@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Breath Monitor</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent: #38bdf8;
+            --success: #22c55e;
+            --error: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 500px;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 1.5rem;
+            padding: 2rem;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+            margin-bottom: 2rem;
+            width: 100%;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            background-color: rgba(56, 189, 248, 0.1);
+            color: var(--accent);
+        }
+
+        .timer {
+            font-size: 4rem;
+            font-weight: 800;
+            margin: 1rem 0;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .bpm-display {
+            font-size: 1.25rem;
+            color: var(--accent);
+            margin-bottom: 1rem;
+        }
+
+        canvas {
+            width: 100%;
+            height: 200px;
+            background-color: rgba(15, 23, 42, 0.5);
+            border-radius: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .graph-container {
+            position: relative;
+            margin-bottom: 1.5rem;
+        }
+
+        .graph-label {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            pointer-events: none;
+        }
+
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            font-size: 1.25rem;
+            font-weight: 600;
+            border-radius: 1rem;
+            cursor: pointer;
+            width: 100%;
+            transition: transform 0.1s, background-color 0.2s;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button:disabled {
+            background-color: var(--text-secondary);
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .stat-box {
+            background: rgba(15, 23, 42, 0.3);
+            padding: 1rem;
+            border-radius: 1rem;
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-top: 0.25rem;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .instruction-box {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-top: 1.5rem;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container" id="setup-view">
+    <h1>Breath Monitor</h1>
+    <p class="subtitle">iPhone 17 Chest Movement Sensor</p>
+
+    <div class="card">
+        <div class="instruction-box">
+            <p>1. Lie flat on your back.</p>
+            <p>2. Place the phone on your chest.</p>
+            <p>3. <strong>Screen facing down.</strong></p>
+            <p>4. Top of phone towards your chin.</p>
+        </div>
+    </div>
+
+    <button id="btn-start">Start Session</button>
+</div>
+
+<div class="container hidden" id="monitor-view">
+    <div class="status-badge" id="status-text">CALIBRATING...</div>
+
+    <div class="card">
+        <div class="timer" id="timer-text">0:00</div>
+        <div class="bpm-display" id="bpm-text">BPM: --</div>
+        <div class="graph-container">
+            <div class="graph-label">Movement Wave</div>
+            <canvas id="breath-chart"></canvas>
+        </div>
+    </div>
+
+    <button id="btn-stop" style="background-color: var(--error);">Stop</button>
+</div>
+
+<div class="container hidden" id="summary-view">
+    <h1>Summary</h1>
+    <p class="subtitle">Session Complete</p>
+
+    <div class="card">
+        <div class="summary-grid">
+            <div class="stat-box">
+                <div class="stat-label">Total Breaths</div>
+                <div class="stat-value" id="res-total">0</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Average BPM</div>
+                <div class="stat-value" id="res-bpm">0.0</div>
+            </div>
+        </div>
+        <div class="stat-box" style="margin-top: 1rem;">
+            <div class="stat-label">Session Duration</div>
+            <div class="stat-value" id="res-duration">60s</div>
+        </div>
+    </div>
+
+    <button id="btn-restart">New Session</button>
+</div>
+
+<script>
+    // Constants
+    const SESSION_DURATION = 60; // seconds
+    const CALIBRATION_DURATION = 5; // seconds
+    const SAMPLE_RATE = 50; // Hz approx
+
+    // State
+    let state = 'IDLE'; // IDLE, CALIBRATING, RECORDING, FINISHED
+    let startTime = 0;
+    let timerInterval = null;
+    let samples = [];
+    let smoothedValue = 0;
+    const alpha = 0.1; // Smoothing factor
+    let baseline = 0;
+    let breathCount = 0;
+    let lastPeakTime = 0;
+    let isRising = false;
+    let peakValue = -Infinity;
+    let troughValue = Infinity;
+
+    // UI Elements
+    const setupView = document.getElementById('setup-view');
+    const monitorView = document.getElementById('monitor-view');
+    const summaryView = document.getElementById('summary-view');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    const btnRestart = document.getElementById('btn-restart');
+    const timerText = document.getElementById('timer-text');
+    const statusText = document.getElementById('status-text');
+    const bpmText = document.getElementById('bpm-text');
+    const canvas = document.getElementById('breath-chart');
+    const ctx = canvas.getContext('2d');
+
+    // Canvas Setup
+    function resizeCanvas() {
+        canvas.width = canvas.offsetWidth * window.devicePixelRatio;
+        canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Permissions and Start
+    btnStart.addEventListener('click', async () => {
+        if (typeof DeviceMotionEvent.requestPermission === 'function') {
+            try {
+                const permission = await DeviceMotionEvent.requestPermission();
+                if (permission === 'granted') {
+                    startSession();
+                } else {
+                    alert('Permission denied for motion sensors.');
+                }
+            } catch (e) {
+                console.error(e);
+                alert('Error requesting permission.');
+            }
+        } else {
+            // Non-iOS or older browser
+            startSession();
+        }
+    });
+
+    btnStop.addEventListener('click', endSession);
+    btnRestart.addEventListener('click', () => {
+        summaryView.classList.add('hidden');
+        setupView.classList.remove('hidden');
+    });
+
+    function startSession() {
+        state = 'CALIBRATING';
+        startTime = Date.now();
+        samples = [];
+        breathCount = 0;
+        lastPeakTime = 0;
+        breathIntervals = [];
+        peakValue = -Infinity;
+        troughValue = Infinity;
+
+        setupView.classList.add('hidden');
+        monitorView.classList.remove('hidden');
+        statusText.textContent = 'CALIBRATING...';
+        statusText.style.color = 'var(--accent)';
+
+        window.addEventListener('devicemotion', handleMotion);
+
+        timerInterval = setInterval(updateUI, 100);
+    }
+
+    function handleMotion(event) {
+        if (!event.accelerationIncludingGravity) return;
+
+        // iPhone Z axis is perpendicular to the screen.
+        // When lying on back, screen facing down, Z+ is down (towards chest), Z- is up.
+        // Breathing causes subtle tilt and vertical movement.
+        // accelerationIncludingGravity is best as it captures tilt changes relative to gravity.
+        const z = event.accelerationIncludingGravity.z || 0;
+        const y = event.accelerationIncludingGravity.y || 0;
+        const x = event.accelerationIncludingGravity.x || 0;
+
+        // We use a combination or just Z. For a phone lying on the chest,
+        // Z is usually the most expressive axis for breathing.
+        const rawValue = z;
+
+        // Simple Low Pass Filter to remove jitter
+        smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
+
+        if (state === 'CALIBRATING') {
+            samples.push(smoothedValue);
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed >= CALIBRATION_DURATION) {
+                baseline = samples.reduce((a, b) => a + b, 0) / samples.length;
+                state = 'RECORDING';
+                startTime = Date.now(); // Reset start time for recording
+                samples = []; // Clear for recording data if needed
+                statusText.textContent = 'RECORDING';
+                statusText.style.color = 'var(--success)';
+            }
+        } else if (state === 'RECORDING') {
+            processBreath(smoothedValue);
+            samples.push(smoothedValue);
+
+            const elapsed = (Date.now() - startTime) / 1000;
+            if (elapsed >= SESSION_DURATION) {
+                endSession();
+            }
+        }
+
+        drawGraph();
+    }
+
+    let breathIntervals = [];
+
+    function processBreath(val) {
+        // Sensitivity threshold - breathing is subtle
+        const threshold = 0.02;
+        const relativeVal = val - baseline;
+
+        // Track extremes for peak detection
+        if (relativeVal > peakValue) peakValue = relativeVal;
+        if (relativeVal < troughValue) troughValue = relativeVal;
+
+        // Peak detection with hysteresis
+        if (!isRising && relativeVal > (troughValue + threshold)) {
+            // Switched from falling to rising (Start of Inhale)
+            isRising = true;
+            troughValue = Infinity;
+        } else if (isRising && relativeVal < (peakValue - threshold)) {
+            // Switched from rising to falling (Start of Exhale)
+            isRising = false;
+            peakValue = -Infinity;
+
+            // Count a breath at the peak-to-exhale transition
+            breathCount++;
+
+            const now = Date.now();
+            if (lastPeakTime > 0) {
+                const duration = now - lastPeakTime;
+                // Basic validation: 1s to 12s per breath
+                if (duration > 1000 && duration < 12000) {
+                    breathIntervals.push(duration);
+                    if (breathIntervals.length > 5) breathIntervals.shift();
+
+                    const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
+                    const bpm = 60000 / avgInterval;
+                    bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
+                }
+            }
+            lastPeakTime = now;
+        }
+    }
+
+    function updateUI() {
+        if (state === 'CALIBRATING') {
+            const elapsed = (Date.now() - startTime) / 1000;
+            const remaining = Math.max(0, CALIBRATION_DURATION - elapsed);
+            timerText.textContent = `0:${Math.ceil(remaining).toString().padStart(2, '0')}`;
+        } else if (state === 'RECORDING') {
+            const elapsed = (Date.now() - startTime) / 1000;
+            const remaining = Math.max(0, SESSION_DURATION - elapsed);
+            const m = Math.floor(remaining / 60);
+            const s = Math.floor(remaining % 60);
+            timerText.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+        }
+    }
+
+    function endSession() {
+        if (state === 'FINISHED') return;
+        state = 'FINISHED';
+        window.removeEventListener('devicemotion', handleMotion);
+        clearInterval(timerInterval);
+
+        monitorView.classList.add('hidden');
+        summaryView.classList.remove('hidden');
+
+        // Final calculation
+        // Calculate average BPM based on the intervals we recorded for better accuracy
+        let finalAvgBpm = 0;
+        if (breathIntervals.length > 0) {
+            const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
+            finalAvgBpm = (60000 / avgInterval).toFixed(1);
+        } else {
+            finalAvgBpm = (breathCount / (SESSION_DURATION / 60)).toFixed(1);
+        }
+
+        document.getElementById('res-total').textContent = breathCount;
+        document.getElementById('res-bpm').textContent = finalAvgBpm;
+
+        const actualDuration = Math.round((Date.now() - startTime) / 1000);
+        document.getElementById('res-duration').textContent = actualDuration + 's';
+    }
+
+    // Graph Drawing
+    const graphData = [];
+    const maxGraphPoints = 150;
+    let autoScale = 1.0;
+
+    function drawGraph() {
+        const val = smoothedValue - baseline;
+        graphData.push(val);
+        if (graphData.length > maxGraphPoints) graphData.shift();
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (graphData.length < 2) return;
+
+        // Auto-scaling logic
+        const maxVal = Math.max(...graphData.map(Math.abs));
+        if (maxVal > 0.01) {
+            const targetScale = (canvas.height * 0.4) / maxVal;
+            autoScale = autoScale * 0.95 + targetScale * 0.05; // Smooth scale transition
+        }
+
+        // Draw baseline
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+        ctx.lineWidth = 1 * window.devicePixelRatio;
+        ctx.moveTo(0, canvas.height / 2);
+        ctx.lineTo(canvas.width, canvas.height / 2);
+        ctx.stroke();
+
+        // Draw data
+        ctx.beginPath();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 3 * window.devicePixelRatio;
+        ctx.lineJoin = 'round';
+
+        const step = canvas.width / (maxGraphPoints - 1);
+        const midY = canvas.height / 2;
+
+        ctx.moveTo(0, midY - graphData[0] * autoScale);
+
+        for (let i = 1; i < graphData.length; i++) {
+            ctx.lineTo(i * step, midY - graphData[i] * autoScale);
+        }
+
+        ctx.stroke();
+
+        // Add glow effect
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#38bdf8';
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+    }
+
+</script>
+
+</body>
+</html>
