@@ -85,6 +85,20 @@
             margin-bottom: 1rem;
         }
 
+        .breath-indicator {
+            width: 20px;
+            height: 20px;
+            background-color: var(--success);
+            border-radius: 50%;
+            margin: 1rem auto;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .breath-indicator.active {
+            opacity: 1;
+        }
+
         canvas {
             width: 100%;
             height: 200px;
@@ -175,7 +189,7 @@
 <div class="container" id="setup-view">
     <h1>Breath Monitor</h1>
     <p class="subtitle">iPhone 17 Chest Movement Sensor</p>
-
+    
     <div class="card">
         <div class="instruction-box">
             <p>1. Lie flat on your back.</p>
@@ -184,29 +198,27 @@
             <p>4. Top of phone towards your chin.</p>
         </div>
     </div>
-
+    
     <button id="btn-start">Start Session</button>
 </div>
 
 <div class="container hidden" id="monitor-view">
     <div class="status-badge" id="status-text">CALIBRATING...</div>
-
+    
     <div class="card">
         <div class="timer" id="timer-text">0:00</div>
         <div class="bpm-display" id="bpm-text">BPM: --</div>
-        <div class="graph-container">
-            <div class="graph-label">Movement Wave</div>
-            <canvas id="breath-chart"></canvas>
-        </div>
+        <div class="breath-indicator" id="breath-led"></div>
+        <p class="subtitle" id="monitor-hint">Recording in progress...</p>
     </div>
-
+    
     <button id="btn-stop" style="background-color: var(--error);">Stop</button>
 </div>
 
 <div class="container hidden" id="summary-view">
     <h1>Summary</h1>
     <p class="subtitle">Session Complete</p>
-
+    
     <div class="card">
         <div class="summary-grid">
             <div class="stat-box">
@@ -218,12 +230,18 @@
                 <div class="stat-value" id="res-bpm">0.0</div>
             </div>
         </div>
+        
+        <div class="graph-container" style="margin-top: 1.5rem;">
+            <div class="graph-label">Session Waveform</div>
+            <canvas id="breath-chart"></canvas>
+        </div>
+
         <div class="stat-box" style="margin-top: 1rem;">
             <div class="stat-label">Session Duration</div>
             <div class="stat-value" id="res-duration">60s</div>
         </div>
     </div>
-
+    
     <button id="btn-restart">New Session</button>
 </div>
 
@@ -238,15 +256,16 @@
     let startTime = 0;
     let timerInterval = null;
     let samples = [];
+    let sessionHistory = []; // To store data for the final graph
     let smoothedValue = 0;
-    const alpha = 0.1; // Smoothing factor
+    const alpha = 0.05; // Increased smoothing (was 0.1)
     let baseline = 0;
     let breathCount = 0;
     let lastPeakTime = 0;
     let isRising = false;
     let peakValue = -Infinity;
     let troughValue = Infinity;
-
+    
     // UI Elements
     const setupView = document.getElementById('setup-view');
     const monitorView = document.getElementById('monitor-view');
@@ -257,8 +276,25 @@
     const timerText = document.getElementById('timer-text');
     const statusText = document.getElementById('status-text');
     const bpmText = document.getElementById('bpm-text');
+    const breathLed = document.getElementById('breath-led');
     const canvas = document.getElementById('breath-chart');
     const ctx = canvas.getContext('2d');
+
+    // Audio Context for beep
+    let audioCtx = null;
+    function playBeep() {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 1);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 1);
+    }
 
     // Canvas Setup
     function resizeCanvas() {
@@ -298,96 +334,85 @@
         state = 'CALIBRATING';
         startTime = Date.now();
         samples = [];
+        sessionHistory = [];
         breathCount = 0;
         lastPeakTime = 0;
         breathIntervals = [];
         peakValue = -Infinity;
         troughValue = Infinity;
-
+        
         setupView.classList.add('hidden');
         monitorView.classList.remove('hidden');
         statusText.textContent = 'CALIBRATING...';
         statusText.style.color = 'var(--accent)';
-
+        
         window.addEventListener('devicemotion', handleMotion);
-
+        
         timerInterval = setInterval(updateUI, 100);
     }
 
     function handleMotion(event) {
         if (!event.accelerationIncludingGravity) return;
 
-        // iPhone Z axis is perpendicular to the screen.
-        // When lying on back, screen facing down, Z+ is down (towards chest), Z- is up.
-        // Breathing causes subtle tilt and vertical movement.
-        // accelerationIncludingGravity is best as it captures tilt changes relative to gravity.
         const z = event.accelerationIncludingGravity.z || 0;
-        const y = event.accelerationIncludingGravity.y || 0;
-        const x = event.accelerationIncludingGravity.x || 0;
-
-        // We use a combination or just Z. For a phone lying on the chest,
-        // Z is usually the most expressive axis for breathing.
         const rawValue = z;
-
-        // Simple Low Pass Filter to remove jitter
+        
+        // Low Pass Filter
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
-
+        
         if (state === 'CALIBRATING') {
             samples.push(smoothedValue);
             const elapsed = (Date.now() - startTime) / 1000;
             if (elapsed >= CALIBRATION_DURATION) {
                 baseline = samples.reduce((a, b) => a + b, 0) / samples.length;
                 state = 'RECORDING';
-                startTime = Date.now(); // Reset start time for recording
-                samples = []; // Clear for recording data if needed
+                startTime = Date.now();
                 statusText.textContent = 'RECORDING';
                 statusText.style.color = 'var(--success)';
             }
         } else if (state === 'RECORDING') {
             processBreath(smoothedValue);
-            samples.push(smoothedValue);
-
+            sessionHistory.push(smoothedValue - baseline);
+            
             const elapsed = (Date.now() - startTime) / 1000;
             if (elapsed >= SESSION_DURATION) {
                 endSession();
             }
         }
-
-        drawGraph();
     }
 
     let breathIntervals = [];
 
     function processBreath(val) {
-        // Sensitivity threshold - breathing is subtle
-        const threshold = 0.02;
+        // Increased threshold to avoid noise (was 0.02)
+        const threshold = 0.04; 
         const relativeVal = val - baseline;
-
-        // Track extremes for peak detection
+        
         if (relativeVal > peakValue) peakValue = relativeVal;
         if (relativeVal < troughValue) troughValue = relativeVal;
 
-        // Peak detection with hysteresis
         if (!isRising && relativeVal > (troughValue + threshold)) {
-            // Switched from falling to rising (Start of Inhale)
             isRising = true;
-            troughValue = Infinity;
+            troughValue = Infinity; 
+            
+            // Visual feedback for start of inhale
+            breathLed.classList.add('active');
         } else if (isRising && relativeVal < (peakValue - threshold)) {
-            // Switched from rising to falling (Start of Exhale)
             isRising = false;
-            peakValue = -Infinity;
-
-            // Count a breath at the peak-to-exhale transition
+            peakValue = -Infinity; 
+            breathLed.classList.remove('active');
+            
             breathCount++;
-
+            
             const now = Date.now();
             if (lastPeakTime > 0) {
                 const duration = now - lastPeakTime;
-                // Basic validation: 1s to 12s per breath
-                if (duration > 1000 && duration < 12000) {
+                // Validate: 15 BPM is 4s per breath. 50 BPM is 1.2s.
+                // We'll keep 1.5s as minimum to avoid counting jitter as breaths
+                if (duration > 1500 && duration < 12000) {
                     breathIntervals.push(duration);
-                    if (breathIntervals.length > 5) breathIntervals.shift();
-
+                    if (breathIntervals.length > 8) breathIntervals.shift();
+                    
                     const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
                     const bpm = 60000 / avgInterval;
                     bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
@@ -416,12 +441,11 @@
         state = 'FINISHED';
         window.removeEventListener('devicemotion', handleMotion);
         clearInterval(timerInterval);
-
+        playBeep();
+        
         monitorView.classList.add('hidden');
         summaryView.classList.remove('hidden');
-
-        // Final calculation
-        // Calculate average BPM based on the intervals we recorded for better accuracy
+        
         let finalAvgBpm = 0;
         if (breathIntervals.length > 0) {
             const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
@@ -432,62 +456,44 @@
 
         document.getElementById('res-total').textContent = breathCount;
         document.getElementById('res-bpm').textContent = finalAvgBpm;
-
+        
         const actualDuration = Math.round((Date.now() - startTime) / 1000);
         document.getElementById('res-duration').textContent = actualDuration + 's';
+
+        // Draw final graph
+        setTimeout(drawFinalGraph, 100);
     }
 
-    // Graph Drawing
-    const graphData = [];
-    const maxGraphPoints = 150;
-    let autoScale = 1.0;
-
-    function drawGraph() {
-        const val = smoothedValue - baseline;
-        graphData.push(val);
-        if (graphData.length > maxGraphPoints) graphData.shift();
-
+    function drawFinalGraph() {
+        resizeCanvas();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (sessionHistory.length < 2) return;
 
-        if (graphData.length < 2) return;
-
-        // Auto-scaling logic
-        const maxVal = Math.max(...graphData.map(Math.abs));
-        if (maxVal > 0.01) {
-            const targetScale = (canvas.height * 0.4) / maxVal;
-            autoScale = autoScale * 0.95 + targetScale * 0.05; // Smooth scale transition
-        }
+        const maxVal = Math.max(...sessionHistory.map(Math.abs));
+        const scale = (canvas.height * 0.4) / (maxVal || 1);
+        const step = canvas.width / (sessionHistory.length - 1);
+        const midY = canvas.height / 2;
 
         // Draw baseline
         ctx.beginPath();
         ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
         ctx.lineWidth = 1 * window.devicePixelRatio;
-        ctx.moveTo(0, canvas.height / 2);
-        ctx.lineTo(canvas.width, canvas.height / 2);
+        ctx.moveTo(0, midY);
+        ctx.lineTo(canvas.width, midY);
         ctx.stroke();
 
         // Draw data
         ctx.beginPath();
         ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 3 * window.devicePixelRatio;
+        ctx.lineWidth = 2 * window.devicePixelRatio;
         ctx.lineJoin = 'round';
-
-        const step = canvas.width / (maxGraphPoints - 1);
-        const midY = canvas.height / 2;
-
-        ctx.moveTo(0, midY - graphData[0] * autoScale);
-
-        for (let i = 1; i < graphData.length; i++) {
-            ctx.lineTo(i * step, midY - graphData[i] * autoScale);
+        
+        ctx.moveTo(0, midY - sessionHistory[0] * scale);
+        for (let i = 1; i < sessionHistory.length; i++) {
+            ctx.lineTo(i * step, midY - sessionHistory[i] * scale);
         }
-
         ctx.stroke();
-
-        // Add glow effect
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = '#38bdf8';
-        ctx.stroke();
-        ctx.shadowBlur = 0;
     }
 
 </script>
