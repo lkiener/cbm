@@ -193,9 +193,9 @@
     <div class="card">
         <div class="instruction-box">
             <p>1. Lie flat on your back.</p>
-            <p>2. Place the phone on your chest.</p>
-            <p>3. <strong>Screen facing down.</strong></p>
-            <p>4. Top of phone towards your chin.</p>
+                <p>2. Place the phone <strong>standing</strong> on your chest.</p>
+                <p>3. Screen facing your head (looking at you).</p>
+                <p>4. Bottom of phone resting on your chest.</p>
         </div>
     </div>
     
@@ -209,7 +209,11 @@
         <div class="timer" id="timer-text">0:00</div>
         <div class="bpm-display" id="bpm-text">BPM: --</div>
         <div class="breath-indicator" id="breath-led"></div>
-        <p class="subtitle" id="monitor-hint">Recording in progress...</p>
+        
+        <div class="graph-container">
+            <div class="graph-label">Live Movement</div>
+            <canvas id="breath-chart-live"></canvas>
+        </div>
     </div>
     
     <button id="btn-stop" style="background-color: var(--error);">Stop</button>
@@ -277,13 +281,33 @@
     const statusText = document.getElementById('status-text');
     const bpmText = document.getElementById('bpm-text');
     const breathLed = document.getElementById('breath-led');
-    const canvas = document.getElementById('breath-chart');
-    const ctx = canvas.getContext('2d');
+    
+    const canvasSummary = document.getElementById('breath-chart');
+    const ctxSummary = canvasSummary.getContext('2d');
+    
+    const canvasLive = document.getElementById('breath-chart-live');
+    const ctxLive = canvasLive.getContext('2d');
 
     // Audio Context for beep
     let audioCtx = null;
+
+    function initAudio() {
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            // Create and play a silent buffer to "unlock" audio on iOS
+            const buffer = audioCtx.createBuffer(1, 1, 22050);
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+            source.start(0);
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+    }
+
     function playBeep() {
-        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!audioCtx) return;
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         osc.connect(gain);
@@ -298,14 +322,19 @@
 
     // Canvas Setup
     function resizeCanvas() {
-        canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-        canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+        [canvasSummary, canvasLive].forEach(c => {
+            if (c.offsetWidth > 0) {
+                c.width = c.offsetWidth * window.devicePixelRatio;
+                c.height = c.offsetHeight * window.devicePixelRatio;
+            }
+        });
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
     // Permissions and Start
     btnStart.addEventListener('click', async () => {
+        initAudio(); // Initialize audio on user gesture
         if (typeof DeviceMotionEvent.requestPermission === 'function') {
             try {
                 const permission = await DeviceMotionEvent.requestPermission();
@@ -354,8 +383,11 @@
     function handleMotion(event) {
         if (!event.accelerationIncludingGravity) return;
 
-        const z = event.accelerationIncludingGravity.z || 0;
-        const rawValue = z;
+        // When standing on chest, screen facing head:
+        // Inhaling (chest rising) causes the phone to tilt.
+        // The Y axis (long axis of phone) is now the most sensitive to gravity changes during tilt.
+        const y = event.accelerationIncludingGravity.y || 0;
+        const rawValue = y;
         
         // Low Pass Filter
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
@@ -378,6 +410,7 @@
             if (elapsed >= SESSION_DURATION) {
                 endSession();
             }
+            drawLiveGraph();
         }
     }
 
@@ -446,12 +479,15 @@
         monitorView.classList.add('hidden');
         summaryView.classList.remove('hidden');
         
+        const actualDurationMs = Date.now() - startTime;
+        const actualDurationSec = actualDurationMs / 1000;
+
         let finalAvgBpm = 0;
         if (breathIntervals.length > 0) {
             const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
             finalAvgBpm = (60000 / avgInterval).toFixed(1);
-        } else {
-            finalAvgBpm = (breathCount / (SESSION_DURATION / 60)).toFixed(1);
+        } else if (breathCount > 0) {
+            finalAvgBpm = (breathCount / (actualDurationSec / 60)).toFixed(1);
         }
 
         document.getElementById('res-total').textContent = breathCount;
@@ -464,36 +500,66 @@
         setTimeout(drawFinalGraph, 100);
     }
 
+    function drawLiveGraph() {
+        const pointsToShow = 150;
+        const data = sessionHistory.slice(-pointsToShow);
+        if (data.length < 2) return;
+
+        ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
+        
+        const maxVal = Math.max(...data.map(Math.abs));
+        const scale = (canvasLive.height * 0.4) / (maxVal || 0.01);
+        const step = canvasLive.width / (pointsToShow - 1);
+        const midY = canvasLive.height / 2;
+
+        ctxLive.beginPath();
+        ctxLive.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+        ctxLive.lineWidth = 1 * window.devicePixelRatio;
+        ctxLive.moveTo(0, midY);
+        ctxLive.lineTo(canvasLive.width, midY);
+        ctxLive.stroke();
+
+        ctxLive.beginPath();
+        ctxLive.strokeStyle = '#38bdf8';
+        ctxLive.lineWidth = 3 * window.devicePixelRatio;
+        ctxLive.lineJoin = 'round';
+        
+        const offset = pointsToShow - data.length;
+        ctxLive.moveTo(offset * step, midY - data[0] * scale);
+        for (let i = 1; i < data.length; i++) {
+            ctxLive.lineTo((i + offset) * step, midY - data[i] * scale);
+        }
+        ctxLive.stroke();
+    }
+
     function drawFinalGraph() {
         resizeCanvas();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctxSummary.clearRect(0, 0, canvasSummary.width, canvasSummary.height);
         
         if (sessionHistory.length < 2) return;
 
         const maxVal = Math.max(...sessionHistory.map(Math.abs));
-        const scale = (canvas.height * 0.4) / (maxVal || 1);
-        const step = canvas.width / (sessionHistory.length - 1);
-        const midY = canvas.height / 2;
+        const scale = (canvasSummary.height * 0.4) / (maxVal || 1);
+        const step = canvasSummary.width / (sessionHistory.length - 1);
+        const midY = canvasSummary.height / 2;
 
-        // Draw baseline
-        ctx.beginPath();
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.2)';
-        ctx.lineWidth = 1 * window.devicePixelRatio;
-        ctx.moveTo(0, midY);
-        ctx.lineTo(canvas.width, midY);
-        ctx.stroke();
+        ctxSummary.beginPath();
+        ctxSummary.strokeStyle = 'rgba(148, 163, 184, 0.2)';
+        ctxSummary.lineWidth = 1 * window.devicePixelRatio;
+        ctxSummary.moveTo(0, midY);
+        ctxSummary.lineTo(canvasSummary.width, midY);
+        ctxSummary.stroke();
 
-        // Draw data
-        ctx.beginPath();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2 * window.devicePixelRatio;
-        ctx.lineJoin = 'round';
+        ctxSummary.beginPath();
+        ctxSummary.strokeStyle = '#38bdf8';
+        ctxSummary.lineWidth = 2 * window.devicePixelRatio;
+        ctxSummary.lineJoin = 'round';
         
-        ctx.moveTo(0, midY - sessionHistory[0] * scale);
+        ctxSummary.moveTo(0, midY - sessionHistory[0] * scale);
         for (let i = 1; i < sessionHistory.length; i++) {
-            ctx.lineTo(i * step, midY - sessionHistory[i] * scale);
+            ctxSummary.lineTo(i * step, midY - sessionHistory[i] * scale);
         }
-        ctx.stroke();
+        ctxSummary.stroke();
     }
 
 </script>
