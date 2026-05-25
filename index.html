@@ -273,19 +273,20 @@
     let startTime = 0;
     let timerInterval = null;
     let samples = [];
-    let sessionHistory = []; // To store data for the final graph
+    let sessionHistory = []; 
     let smoothedValue = 0;
-    const alpha = 0.02; // Very aggressive smoothing for a clean wave
+    const alpha = 0.03; // Smoothing factor
     let baseline = 0;
-    let breathCount = 0;
-    let lastPeakTime = 0;
-    let isRising = false;
-    let peakValue = -Infinity;
-    let troughValue = Infinity;
     
-    // Dynamic scaling for the live graph
-    let liveMin = Infinity;
-    let liveMax = -Infinity;
+    // Breath Detection State (Hysteresis-based)
+    let isMovingUp = false;
+    let currentPeak = -Infinity;
+    let currentTrough = Infinity;
+    const HYSTERESIS = 0.05; // Amount of reversal needed to trigger a phase change
+    let lastPeakTime = 0;
+    let breathCount = 0;
+    let breathIntervals = [];
+    const NOISE_THRESHOLD = 0.005; // Adjusted for accelerometer sensitivity
     
     // UI Elements
     const setupView = document.getElementById('setup-view');
@@ -312,7 +313,6 @@
     function initAudio() {
         if (!audioCtx) {
             audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            // Create and play a silent buffer to "unlock" audio on iOS
             const buffer = audioCtx.createBuffer(1, 1, 22050);
             const source = audioCtx.createBufferSource();
             source.buffer = buffer;
@@ -338,7 +338,6 @@
         osc.stop(audioCtx.currentTime + 1);
     }
 
-    // Canvas Setup
     function resizeCanvas() {
         [canvasSummary, canvasLive].forEach(c => {
             if (c.offsetWidth > 0) {
@@ -350,9 +349,8 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // Permissions and Start
     btnStart.addEventListener('click', async () => {
-        initAudio(); // Initialize audio on user gesture
+        initAudio();
         if (typeof DeviceMotionEvent.requestPermission === 'function') {
             try {
                 const permission = await DeviceMotionEvent.requestPermission();
@@ -366,7 +364,6 @@
                 alert('Error requesting permission.');
             }
         } else {
-            // Non-iOS or older browser
             startSession();
         }
     });
@@ -385,10 +382,11 @@
         breathCount = 0;
         lastPeakTime = 0;
         breathIntervals = [];
-        peakValue = -Infinity;
-        troughValue = Infinity;
-        liveMin = Infinity;
-        liveMax = -Infinity;
+        currentPeak = -Infinity;
+        currentTrough = Infinity;
+        isMovingUp = false;
+        lastSmoothedValue = 0;
+        smoothedValue = 0;
         
         setupView.classList.add('hidden');
         monitorView.classList.remove('hidden');
@@ -396,25 +394,18 @@
         statusText.style.color = 'var(--accent)';
         
         window.addEventListener('devicemotion', handleMotion);
-        
         timerInterval = setInterval(updateUI, 100);
     }
 
     function handleMotion(event) {
         if (!event.accelerationIncludingGravity) return;
 
-        // When standing on chest, screen facing head:
-        // Inhaling (chest rising) causes the phone to tilt.
-        // On iPhone, a 'chin-wards' tilt usually decreases Y or increases it depending on gravity.
-        // We'll normalize this by tracking the range and allowing auto-scaling.
         const y = event.accelerationIncludingGravity.y || 0;
+        // Raw Y is ~ -9.8 when vertical. Tilting towards horizontal (inhale) moves it towards 0.
+        // So y: -9.8 -> -8 is an increase. This moves the graph UP.
+        const rawValue = y;
         
-        // INVERSION FIX: 
-        // Based on your screenshot, inhaling is currently moving the line DOWN.
-        // We invert the raw value so that chest expansion moves the graph UP.
-        const rawValue = -y; 
-        
-        // Low Pass Filter
+        if (smoothedValue === 0) smoothedValue = rawValue;
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
         
         if (state === 'CALIBRATING') {
@@ -439,44 +430,49 @@
         }
     }
 
-    let breathIntervals = [];
-
     function processBreath(val) {
-        // Increased threshold to avoid noise (was 0.02)
-        const threshold = 0.04; 
         const relativeVal = val - baseline;
-        
-        if (relativeVal > peakValue) peakValue = relativeVal;
-        if (relativeVal < troughValue) troughValue = relativeVal;
 
-        if (!isRising && relativeVal > (troughValue + threshold)) {
-            isRising = true;
-            troughValue = Infinity; 
-            
-            // Visual feedback for start of inhale
-            breathLed.classList.add('active');
-        } else if (isRising && relativeVal < (peakValue - threshold)) {
-            isRising = false;
-            peakValue = -Infinity; 
-            breathLed.classList.remove('active');
-            
-            breathCount++;
-            
-            const now = Date.now();
-            if (lastPeakTime > 0) {
-                const duration = now - lastPeakTime;
-                // Validate: 15 BPM is 4s per breath. 50 BPM is 1.2s.
-                // We'll keep 1.5s as minimum to avoid counting jitter as breaths
-                if (duration > 1500 && duration < 12000) {
-                    breathIntervals.push(duration);
-                    if (breathIntervals.length > 8) breathIntervals.shift();
-                    
-                    const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
-                    const bpm = 60000 / avgInterval;
-                    bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
-                }
+        if (isMovingUp) {
+            if (relativeVal > currentPeak) {
+                currentPeak = relativeVal;
             }
-            lastPeakTime = now;
+            // Check for reversal (Exhale start)
+            if (relativeVal < currentPeak - HYSTERESIS) {
+                isMovingUp = false;
+                currentTrough = relativeVal;
+                breathLed.classList.remove('active');
+                
+                // Breath completed on peak-to-peak or trough-to-trough.
+                // We'll count on peak detection (start of exhale).
+                const now = Date.now();
+                if (lastPeakTime > 0) {
+                    const duration = now - lastPeakTime;
+                    // Box breathing is slow (16s cycle). We allow 6s to 25s.
+                    if (duration > 6000 && duration < 25000) {
+                        breathCount++;
+                        breathIntervals.push(duration);
+                        if (breathIntervals.length > 5) breathIntervals.shift();
+                        
+                        const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
+                        const bpm = 60000 / avgInterval;
+                        bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
+                    }
+                } else {
+                    breathCount++; 
+                }
+                lastPeakTime = now;
+            }
+        } else {
+            if (relativeVal < currentTrough) {
+                currentTrough = relativeVal;
+            }
+            // Check for reversal (Inhale start)
+            if (relativeVal > currentTrough + HYSTERESIS) {
+                isMovingUp = true;
+                currentPeak = relativeVal;
+                breathLed.classList.add('active');
+            }
         }
     }
 
@@ -493,7 +489,6 @@
             const s = Math.floor(remaining % 60);
             timerText.textContent = `${m}:${s.toString().padStart(2, '0')}`;
             
-            // Box Breathing Phase Logic
             const cycleTime = elapsed % 16;
             if (cycleTime < 4) {
                 phaseDisplay.textContent = 'Inhale';
@@ -521,52 +516,48 @@
         monitorView.classList.add('hidden');
         summaryView.classList.remove('hidden');
         
-        const actualDurationMs = Date.now() - startTime;
-        const actualDurationSec = actualDurationMs / 1000;
-
+        const actualDurationSec = (Date.now() - startTime) / 1000;
         let finalAvgBpm = 0;
         if (breathIntervals.length > 0) {
             const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
             finalAvgBpm = (60000 / avgInterval).toFixed(1);
-        } else if (breathCount > 0) {
+        } else {
             finalAvgBpm = (breathCount / (actualDurationSec / 60)).toFixed(1);
         }
 
         document.getElementById('res-total').textContent = breathCount;
         document.getElementById('res-bpm').textContent = finalAvgBpm;
-        
-        const actualDuration = Math.round((Date.now() - startTime) / 1000);
-        document.getElementById('res-duration').textContent = actualDuration + 's';
+        document.getElementById('res-duration').textContent = Math.round(actualDurationSec) + 's';
 
-        // Draw final graph
         setTimeout(drawFinalGraph, 100);
     }
 
     function drawLiveGraph() {
-        const pointsToShow = 150;
+        const pointsToShow = 400; // About 8 seconds
+        const scaleWindow = 1000; // About 20 seconds
         const data = sessionHistory.slice(-pointsToShow);
+        const scaleData = sessionHistory.slice(-scaleWindow);
         if (data.length < 2) return;
 
         ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
         
-        // Dynamic Range Tracking for Auto-Scaling
-        const recentMin = Math.min(...data);
-        const recentMax = Math.max(...data);
+        // Use a more robust range (ignore extreme outliers)
+        const sorted = [...scaleData].sort((a, b) => a - b);
+        const p10 = sorted[Math.floor(sorted.length * 0.1)];
+        const p90 = sorted[Math.floor(sorted.length * 0.9)];
         
-        // Smoothly expand the tracked range
-        if (recentMin < liveMin) liveMin = liveMin * 0.9 + recentMin * 0.1;
-        if (recentMax > liveMax) liveMax = liveMax * 0.9 + recentMax * 0.1;
+        const recentMin = p10;
+        const recentMax = p90;
+        const range = Math.max(0.15, recentMax - recentMin); 
+        const dataCenter = (recentMin + recentMax) / 2;
         
-        // Ensure we have a minimum range to avoid flatline scaling
-        const range = Math.max(0.1, liveMax - liveMin);
-        const scale = (canvasLive.height * 0.7) / range;
-        
+        const scale = (canvasLive.height * 0.65) / range;
         const step = canvasLive.width / (pointsToShow - 1);
         const midY = canvasLive.height / 2;
 
         // Draw Guide Wave (Goal Path)
         ctxLive.beginPath();
-        ctxLive.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+        ctxLive.strokeStyle = 'rgba(255, 255, 255, 0.15)';
         ctxLive.setLineDash([5, 5]);
         ctxLive.lineWidth = 2 * window.devicePixelRatio;
         
@@ -578,26 +569,18 @@
             const cycleTime = (timeAtPoint % 16 + 16) % 16;
             let goalY = 0;
             
-            if (cycleTime < 4) goalY = -1 + (cycleTime / 4) * 2; // Inhale (-1 to 1)
-            else if (cycleTime < 8) goalY = 1; // Hold
-            else if (cycleTime < 12) goalY = 1 - ((cycleTime - 8) / 4) * 2; // Exhale (1 to -1)
-            else goalY = -1; // Hold
+            if (cycleTime < 4) goalY = -1 + (cycleTime / 4) * 2;
+            else if (cycleTime < 8) goalY = 1;
+            else if (cycleTime < 12) goalY = 1 - ((cycleTime - 8) / 4) * 2;
+            else goalY = -1;
 
             const x = i * step;
-            const y = midY - goalY * (canvasLive.height * 0.35);
+            const y = midY - goalY * (canvasLive.height * 0.3);
             if (i === 0) ctxLive.moveTo(x, y);
             else ctxLive.lineTo(x, y);
         }
         ctxLive.stroke();
-        ctxLive.setLineDash([]); // Reset
-
-        // Draw Baseline
-        ctxLive.beginPath();
-        ctxLive.strokeStyle = 'rgba(148, 163, 184, 0.2)';
-        ctxLive.lineWidth = 1 * window.devicePixelRatio;
-        ctxLive.moveTo(0, midY);
-        ctxLive.lineTo(canvasLive.width, midY);
-        ctxLive.stroke();
+        ctxLive.setLineDash([]);
 
         // Draw User Data
         ctxLive.beginPath();
@@ -606,8 +589,6 @@
         ctxLive.lineJoin = 'round';
         
         const offset = pointsToShow - data.length;
-        const dataCenter = (liveMin + liveMax) / 2;
-
         ctxLive.moveTo(offset * step, midY - (data[0] - dataCenter) * scale);
         for (let i = 1; i < data.length; i++) {
             ctxLive.lineTo((i + offset) * step, midY - (data[i] - dataCenter) * scale);
@@ -618,11 +599,14 @@
     function drawFinalGraph() {
         resizeCanvas();
         ctxSummary.clearRect(0, 0, canvasSummary.width, canvasSummary.height);
-        
         if (sessionHistory.length < 2) return;
 
-        const maxVal = Math.max(...sessionHistory.map(Math.abs));
-        const scale = (canvasSummary.height * 0.4) / (maxVal || 1);
+        const minVal = Math.min(...sessionHistory);
+        const maxVal = Math.max(...sessionHistory);
+        const range = Math.max(0.1, maxVal - minVal);
+        const dataCenter = (minVal + maxVal) / 2;
+        
+        const scale = (canvasSummary.height * 0.7) / range;
         const step = canvasSummary.width / (sessionHistory.length - 1);
         const midY = canvasSummary.height / 2;
 
@@ -636,11 +620,9 @@
         ctxSummary.beginPath();
         ctxSummary.strokeStyle = '#38bdf8';
         ctxSummary.lineWidth = 2 * window.devicePixelRatio;
-        ctxSummary.lineJoin = 'round';
-        
-        ctxSummary.moveTo(0, midY - sessionHistory[0] * scale);
+        ctxSummary.moveTo(0, midY - (sessionHistory[0] - dataCenter) * scale);
         for (let i = 1; i < sessionHistory.length; i++) {
-            ctxSummary.lineTo(i * step, midY - sessionHistory[i] * scale);
+            ctxSummary.lineTo(i * step, midY - (sessionHistory[i] - dataCenter) * scale);
         }
         ctxSummary.stroke();
     }
