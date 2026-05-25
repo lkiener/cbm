@@ -196,8 +196,13 @@
         .calib-step {
             font-size: 1.5rem;
             font-weight: 600;
-            margin: 2rem 0;
+            margin: 1.5rem 0;
             color: var(--accent);
+        }
+
+        .preview-mini {
+            height: 80px;
+            margin-top: 1rem;
         }
     </style>
 </head>
@@ -205,7 +210,7 @@
 
 <div class="container" id="setup-view">
     <h1>Breath Monitor</h1>
-    <p class="subtitle">Manual Calibration Mode</p>
+    <p class="subtitle">Standing Chest Sensor</p>
     
     <div class="card">
         <div class="instruction-box">
@@ -221,8 +226,12 @@
 <div class="container hidden" id="calib-view">
     <h1 id="calib-title">Calibration</h1>
     <div class="card">
-        <div class="calib-step" id="calib-instruction">Exhale fully and tap the screen</div>
-        <div class="instruction-box" id="calib-sub">We are measuring your range.</div>
+        <div class="calib-step" id="calib-instruction">Exhale fully and tap</div>
+        <div class="graph-container preview-mini">
+            <div class="graph-label">Real-time Preview</div>
+            <canvas id="calib-preview"></canvas>
+        </div>
+        <div class="instruction-box" id="calib-sub">Ensure inhalation moves the line UP.</div>
     </div>
     <button id="btn-calib-next">TAP NOW</button>
 </div>
@@ -287,13 +296,14 @@
     let startTime = 0;
     let timerInterval = null;
     let sessionHistory = []; 
+    let calibHistory = [];
     let smoothedValue = 0;
-    const alpha = 0.03; 
+    const alpha = 0.015; // Stronger low-pass filter for extreme smoothness
     
     // Calibration Values
     let calibMin = 0; // Exhale point
     let calibMax = 0; // Inhale point
-    let currentRange = 0.5; // Default if calibration is narrow
+    let currentRange = 0.5; 
     let dynamicMin = 0;
     let dynamicMax = 0;
 
@@ -326,6 +336,8 @@
     const ctxSummary = canvasSummary.getContext('2d');
     const canvasLive = document.getElementById('breath-chart-live');
     const ctxLive = canvasLive.getContext('2d');
+    const canvasPreview = document.getElementById('calib-preview');
+    const ctxPreview = canvasPreview.getContext('2d');
 
     let audioCtx = null;
 
@@ -356,7 +368,7 @@
     }
 
     function resizeCanvas() {
-        [canvasSummary, canvasLive].forEach(c => {
+        [canvasSummary, canvasLive, canvasPreview].forEach(c => {
             if (c.offsetWidth > 0) {
                 c.width = c.offsetWidth * window.devicePixelRatio;
                 c.height = c.offsetHeight * window.devicePixelRatio;
@@ -365,8 +377,6 @@
     }
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
-
-    // --- Permissions & Transitions ---
 
     btnStartCalib.addEventListener('click', async () => {
         initAudio();
@@ -386,6 +396,7 @@
         setupView.classList.add('hidden');
         calibView.classList.remove('hidden');
         calibInstruction.textContent = "Exhale fully and tap";
+        resizeCanvas();
         window.addEventListener('devicemotion', handleMotion);
     }
 
@@ -423,6 +434,7 @@
         
         calibView.classList.add('hidden');
         monitorView.classList.remove('hidden');
+        resizeCanvas();
         timerInterval = setInterval(updateUI, 100);
     }
 
@@ -434,7 +446,11 @@
         if (smoothedValue === 0) smoothedValue = rawValue;
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
         
-        if (state === 'RECORDING') {
+        if (state === 'CALIB_EXHALE' || state === 'CALIB_INHALE') {
+            calibHistory.push(smoothedValue);
+            if (calibHistory.length > 200) calibHistory.shift();
+            drawPreviewGraph();
+        } else if (state === 'RECORDING') {
             processBreath(smoothedValue);
             sessionHistory.push(smoothedValue);
             
@@ -445,7 +461,6 @@
     }
 
     function processBreath(val) {
-        // Hysteresis based on calibrated range
         const hysteresis = currentRange * 0.15; 
 
         if (isMovingUp) {
@@ -505,6 +520,7 @@
         
         monitorView.classList.add('hidden');
         summaryView.classList.remove('hidden');
+        resizeCanvas();
         
         const actualDurationSec = (Date.now() - startTime) / 1000;
         let finalAvgBpm = 0;
@@ -522,6 +538,27 @@
         setTimeout(drawFinalGraph, 100);
     }
 
+    function drawPreviewGraph() {
+        if (calibHistory.length < 2) return;
+        ctxPreview.clearRect(0, 0, canvasPreview.width, canvasPreview.height);
+        const min = Math.min(...calibHistory);
+        const max = Math.max(...calibHistory);
+        const range = Math.max(0.1, max - min);
+        const scale = (canvasPreview.height * 0.7) / range;
+        const step = canvasPreview.width / (calibHistory.length - 1);
+        const midY = canvasPreview.height / 2;
+        const center = (min + max) / 2;
+
+        ctxPreview.beginPath();
+        ctxPreview.strokeStyle = '#38bdf8';
+        ctxPreview.lineWidth = 2 * window.devicePixelRatio;
+        ctxPreview.moveTo(0, midY - (calibHistory[0] - center) * scale);
+        for (let i = 1; i < calibHistory.length; i++) {
+            ctxPreview.lineTo(i * step, midY - (calibHistory[i] - center) * scale);
+        }
+        ctxPreview.stroke();
+    }
+
     function drawLiveGraph() {
         const pointsToShow = 400; 
         const data = sessionHistory.slice(-pointsToShow);
@@ -529,11 +566,9 @@
 
         ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
         
-        // Auto-Adjusting scaling based on session history
         const recentMin = Math.min(...data);
         const recentMax = Math.max(...data);
         
-        // Blend calibrated range with recent range for stability
         dynamicMin = dynamicMin * 0.99 + recentMin * 0.01;
         dynamicMax = dynamicMax * 0.99 + recentMax * 0.01;
         
@@ -544,9 +579,9 @@
         const step = canvasLive.width / (pointsToShow - 1);
         const midY = canvasLive.height / 2;
 
-        // Draw Guide Wave
+        // Guide Wave
         ctxLive.beginPath();
-        ctxLive.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+        ctxLive.strokeStyle = 'rgba(255, 255, 255, 0.1)';
         ctxLive.setLineDash([5, 5]);
         ctxLive.lineWidth = 2 * window.devicePixelRatio;
         const elapsed = (Date.now() - startTime) / 1000;
@@ -565,7 +600,7 @@
         ctxLive.stroke();
         ctxLive.setLineDash([]);
 
-        // Draw User Data
+        // User Data
         ctxLive.beginPath();
         ctxLive.strokeStyle = '#38bdf8';
         ctxLive.lineWidth = 3 * window.devicePixelRatio;
@@ -579,26 +614,22 @@
     }
 
     function drawFinalGraph() {
-        resizeCanvas();
         ctxSummary.clearRect(0, 0, canvasSummary.width, canvasSummary.height);
         if (sessionHistory.length < 2) return;
         const minVal = Math.min(...sessionHistory);
         const maxVal = Math.max(...sessionHistory);
         const range = Math.max(0.1, maxVal - minVal);
-        const dataCenter = (minVal + maxVal) / 2;
+        const center = (minVal + maxVal) / 2;
         const scale = (canvasSummary.height * 0.7) / range;
         const step = canvasSummary.width / (sessionHistory.length - 1);
         const midY = canvasSummary.height / 2;
-        ctxSummary.beginPath();
-        ctxSummary.strokeStyle = 'rgba(148, 163, 184, 0.2)';
-        ctxSummary.moveTo(0, midY); ctxSummary.lineTo(canvasSummary.width, midY);
-        ctxSummary.stroke();
+        
         ctxSummary.beginPath();
         ctxSummary.strokeStyle = '#38bdf8';
         ctxSummary.lineWidth = 2 * window.devicePixelRatio;
-        ctxSummary.moveTo(0, midY - (sessionHistory[0] - dataCenter) * scale);
+        ctxSummary.moveTo(0, midY - (sessionHistory[0] - center) * scale);
         for (let i = 1; i < sessionHistory.length; i++) {
-            ctxSummary.lineTo(i * step, midY - (sessionHistory[i] - dataCenter) * scale);
+            ctxSummary.lineTo(i * step, midY - (sessionHistory[i] - center) * scale);
         }
         ctxSummary.stroke();
     }
