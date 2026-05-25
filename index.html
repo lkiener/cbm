@@ -187,10 +187,17 @@
         }
 
         .instruction-box {
-            font-size: 0.9rem;
+            font-size: 1rem;
             color: var(--text-secondary);
-            margin-top: 1.5rem;
-            line-height: 1.4;
+            margin-top: 1rem;
+            line-height: 1.6;
+        }
+
+        .calib-step {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 2rem 0;
+            color: var(--accent);
         }
     </style>
 </head>
@@ -198,22 +205,30 @@
 
 <div class="container" id="setup-view">
     <h1>Breath Monitor</h1>
-    <p class="subtitle">iPhone 17 Chest Movement Sensor</p>
+    <p class="subtitle">Manual Calibration Mode</p>
     
     <div class="card">
         <div class="instruction-box">
             <p>1. Lie flat on your back.</p>
-                <p>2. Place the phone <strong>standing</strong> on your chest.</p>
-                <p>3. Screen facing your head (looking at you).</p>
-                <p>4. Bottom of phone resting on your chest.</p>
+            <p>2. Place phone <strong>standing</strong> on chest.</p>
+            <p>3. Screen facing head.</p>
         </div>
     </div>
     
-    <button id="btn-start">Start Session</button>
+    <button id="btn-start-calib">Start Calibration</button>
+</div>
+
+<div class="container hidden" id="calib-view">
+    <h1 id="calib-title">Calibration</h1>
+    <div class="card">
+        <div class="calib-step" id="calib-instruction">Exhale fully and tap the screen</div>
+        <div class="instruction-box" id="calib-sub">We are measuring your range.</div>
+    </div>
+    <button id="btn-calib-next">TAP NOW</button>
 </div>
 
 <div class="container hidden" id="monitor-view">
-    <div class="status-badge" id="status-text">CALIBRATING...</div>
+    <div class="status-badge" id="status-text">RECORDING</div>
     
     <div class="card">
         <div class="timer" id="timer-text">0:00</div>
@@ -253,7 +268,7 @@
 
         <div class="stat-box" style="margin-top: 1rem;">
             <div class="stat-label">Session Duration</div>
-            <div class="stat-value" id="res-duration">60s</div>
+            <div class="stat-value" id="res-duration">64s</div>
         </div>
     </div>
     
@@ -262,52 +277,56 @@
 
 <script>
     // Constants
-    const PHASE_DURATION = 4; // seconds per box phase
+    const PHASE_DURATION = 4;
     const BOX_CYCLES = 4;
     const SESSION_DURATION = PHASE_DURATION * 4 * BOX_CYCLES; // 64 seconds
-    const CALIBRATION_DURATION = 5; // seconds
-    const SAMPLE_RATE = 50; // Hz approx
+    const SAMPLE_RATE = 50;
 
     // State
-    let state = 'IDLE'; // IDLE, CALIBRATING, RECORDING, FINISHED
+    let state = 'IDLE'; // IDLE, CALIB_EXHALE, CALIB_INHALE, RECORDING, FINISHED
     let startTime = 0;
     let timerInterval = null;
-    let samples = [];
     let sessionHistory = []; 
     let smoothedValue = 0;
-    const alpha = 0.03; // Smoothing factor
-    let baseline = 0;
+    const alpha = 0.03; 
     
-    // Breath Detection State (Hysteresis-based)
+    // Calibration Values
+    let calibMin = 0; // Exhale point
+    let calibMax = 0; // Inhale point
+    let currentRange = 0.5; // Default if calibration is narrow
+    let dynamicMin = 0;
+    let dynamicMax = 0;
+
+    // Breath Detection
     let isMovingUp = false;
     let currentPeak = -Infinity;
     let currentTrough = Infinity;
-    const HYSTERESIS = 0.05; // Amount of reversal needed to trigger a phase change
     let lastPeakTime = 0;
     let breathCount = 0;
     let breathIntervals = [];
-    const NOISE_THRESHOLD = 0.005; // Adjusted for accelerometer sensitivity
     
     // UI Elements
     const setupView = document.getElementById('setup-view');
+    const calibView = document.getElementById('calib-view');
     const monitorView = document.getElementById('monitor-view');
     const summaryView = document.getElementById('summary-view');
-    const btnStart = document.getElementById('btn-start');
+    
+    const btnStartCalib = document.getElementById('btn-start-calib');
+    const btnCalibNext = document.getElementById('btn-calib-next');
     const btnStop = document.getElementById('btn-stop');
     const btnRestart = document.getElementById('btn-restart');
+    
+    const calibInstruction = document.getElementById('calib-instruction');
     const timerText = document.getElementById('timer-text');
-    const statusText = document.getElementById('status-text');
     const phaseDisplay = document.getElementById('phase-text');
     const bpmText = document.getElementById('bpm-text');
     const breathLed = document.getElementById('breath-led');
     
     const canvasSummary = document.getElementById('breath-chart');
     const ctxSummary = canvasSummary.getContext('2d');
-    
     const canvasLive = document.getElementById('breath-chart-live');
     const ctxLive = canvasLive.getContext('2d');
 
-    // Audio Context for beep
     let audioCtx = null;
 
     function initAudio() {
@@ -319,9 +338,7 @@
             source.connect(audioCtx.destination);
             source.start(0);
         }
-        if (audioCtx.state === 'suspended') {
-            audioCtx.resume();
-        }
+        if (audioCtx.state === 'suspended') audioCtx.resume();
     }
 
     function playBeep() {
@@ -349,35 +366,53 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    btnStart.addEventListener('click', async () => {
+    // --- Permissions & Transitions ---
+
+    btnStartCalib.addEventListener('click', async () => {
         initAudio();
         if (typeof DeviceMotionEvent.requestPermission === 'function') {
             try {
                 const permission = await DeviceMotionEvent.requestPermission();
-                if (permission === 'granted') {
-                    startSession();
-                } else {
-                    alert('Permission denied for motion sensors.');
-                }
-            } catch (e) {
-                console.error(e);
-                alert('Error requesting permission.');
-            }
+                if (permission === 'granted') enterExhaleCalib();
+                else alert('Permission denied.');
+            } catch (e) { alert('Error: ' + e); }
         } else {
+            enterExhaleCalib();
+        }
+    });
+
+    function enterExhaleCalib() {
+        state = 'CALIB_EXHALE';
+        setupView.classList.add('hidden');
+        calibView.classList.remove('hidden');
+        calibInstruction.textContent = "Exhale fully and tap";
+        window.addEventListener('devicemotion', handleMotion);
+    }
+
+    btnCalibNext.addEventListener('click', () => {
+        if (state === 'CALIB_EXHALE') {
+            calibMin = smoothedValue;
+            state = 'CALIB_INHALE';
+            calibInstruction.textContent = "Inhale fully and tap";
+            calibInstruction.style.color = "var(--success)";
+        } else if (state === 'CALIB_INHALE') {
+            calibMax = smoothedValue;
+            // Ensure min < max
+            if (calibMin > calibMax) {
+                let temp = calibMin;
+                calibMin = calibMax;
+                calibMax = temp;
+            }
+            currentRange = Math.max(0.2, calibMax - calibMin);
+            dynamicMin = calibMin;
+            dynamicMax = calibMax;
             startSession();
         }
     });
 
-    btnStop.addEventListener('click', endSession);
-    btnRestart.addEventListener('click', () => {
-        summaryView.classList.add('hidden');
-        setupView.classList.remove('hidden');
-    });
-
     function startSession() {
-        state = 'CALIBRATING';
+        state = 'RECORDING';
         startTime = Date.now();
-        samples = [];
         sessionHistory = [];
         breathCount = 0;
         lastPeakTime = 0;
@@ -385,78 +420,50 @@
         currentPeak = -Infinity;
         currentTrough = Infinity;
         isMovingUp = false;
-        lastSmoothedValue = 0;
-        smoothedValue = 0;
         
-        setupView.classList.add('hidden');
+        calibView.classList.add('hidden');
         monitorView.classList.remove('hidden');
-        statusText.textContent = 'CALIBRATING...';
-        statusText.style.color = 'var(--accent)';
-        
-        window.addEventListener('devicemotion', handleMotion);
         timerInterval = setInterval(updateUI, 100);
     }
 
     function handleMotion(event) {
         if (!event.accelerationIncludingGravity) return;
-
         const y = event.accelerationIncludingGravity.y || 0;
-        // Raw Y is ~ -9.8 when vertical. Tilting towards horizontal (inhale) moves it towards 0.
-        // So y: -9.8 -> -8 is an increase. This moves the graph UP.
-        const rawValue = y;
+        const rawValue = y; 
         
         if (smoothedValue === 0) smoothedValue = rawValue;
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
         
-        if (state === 'CALIBRATING') {
-            samples.push(smoothedValue);
-            const elapsed = (Date.now() - startTime) / 1000;
-            if (elapsed >= CALIBRATION_DURATION) {
-                baseline = samples.reduce((a, b) => a + b, 0) / samples.length;
-                state = 'RECORDING';
-                startTime = Date.now();
-                statusText.textContent = 'RECORDING';
-                statusText.style.color = 'var(--success)';
-            }
-        } else if (state === 'RECORDING') {
+        if (state === 'RECORDING') {
             processBreath(smoothedValue);
-            sessionHistory.push(smoothedValue - baseline);
+            sessionHistory.push(smoothedValue);
             
             const elapsed = (Date.now() - startTime) / 1000;
-            if (elapsed >= SESSION_DURATION) {
-                endSession();
-            }
+            if (elapsed >= SESSION_DURATION) endSession();
             drawLiveGraph();
         }
     }
 
     function processBreath(val) {
-        const relativeVal = val - baseline;
+        // Hysteresis based on calibrated range
+        const hysteresis = currentRange * 0.15; 
 
         if (isMovingUp) {
-            if (relativeVal > currentPeak) {
-                currentPeak = relativeVal;
-            }
-            // Check for reversal (Exhale start)
-            if (relativeVal < currentPeak - HYSTERESIS) {
+            if (val > currentPeak) currentPeak = val;
+            if (val < currentPeak - hysteresis) {
                 isMovingUp = false;
-                currentTrough = relativeVal;
+                currentTrough = val;
                 breathLed.classList.remove('active');
                 
-                // Breath completed on peak-to-peak or trough-to-trough.
-                // We'll count on peak detection (start of exhale).
                 const now = Date.now();
                 if (lastPeakTime > 0) {
                     const duration = now - lastPeakTime;
-                    // Box breathing is slow (16s cycle). We allow 6s to 25s.
                     if (duration > 6000 && duration < 25000) {
                         breathCount++;
                         breathIntervals.push(duration);
                         if (breathIntervals.length > 5) breathIntervals.shift();
-                        
                         const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
-                        const bpm = 60000 / avgInterval;
-                        bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
+                        bpmText.textContent = `BPM: ${(60000 / avgInterval).toFixed(1)}`;
                     }
                 } else {
                     breathCount++; 
@@ -464,25 +471,17 @@
                 lastPeakTime = now;
             }
         } else {
-            if (relativeVal < currentTrough) {
-                currentTrough = relativeVal;
-            }
-            // Check for reversal (Inhale start)
-            if (relativeVal > currentTrough + HYSTERESIS) {
+            if (val < currentTrough) currentTrough = val;
+            if (val > currentTrough + hysteresis) {
                 isMovingUp = true;
-                currentPeak = relativeVal;
+                currentPeak = val;
                 breathLed.classList.add('active');
             }
         }
     }
 
     function updateUI() {
-        if (state === 'CALIBRATING') {
-            const elapsed = (Date.now() - startTime) / 1000;
-            const remaining = Math.max(0, CALIBRATION_DURATION - elapsed);
-            timerText.textContent = `0:${Math.ceil(remaining).toString().padStart(2, '0')}`;
-            phaseDisplay.textContent = 'Get Ready';
-        } else if (state === 'RECORDING') {
+        if (state === 'RECORDING') {
             const elapsed = (Date.now() - startTime) / 1000;
             const remaining = Math.max(0, SESSION_DURATION - elapsed);
             const m = Math.floor(remaining / 60);
@@ -490,19 +489,10 @@
             timerText.textContent = `${m}:${s.toString().padStart(2, '0')}`;
             
             const cycleTime = elapsed % 16;
-            if (cycleTime < 4) {
-                phaseDisplay.textContent = 'Inhale';
-                phaseDisplay.style.color = 'var(--accent)';
-            } else if (cycleTime < 8) {
-                phaseDisplay.textContent = 'Hold';
-                phaseDisplay.style.color = 'var(--text-secondary)';
-            } else if (cycleTime < 12) {
-                phaseDisplay.textContent = 'Exhale';
-                phaseDisplay.style.color = 'var(--success)';
-            } else {
-                phaseDisplay.textContent = 'Hold';
-                phaseDisplay.style.color = 'var(--text-secondary)';
-            }
+            if (cycleTime < 4) { phaseDisplay.textContent = 'Inhale'; phaseDisplay.style.color = 'var(--accent)'; }
+            else if (cycleTime < 8) { phaseDisplay.textContent = 'Hold'; phaseDisplay.style.color = 'var(--text-secondary)'; }
+            else if (cycleTime < 12) { phaseDisplay.textContent = 'Exhale'; phaseDisplay.style.color = 'var(--success)'; }
+            else { phaseDisplay.textContent = 'Hold'; phaseDisplay.style.color = 'var(--text-secondary)'; }
         }
     }
 
@@ -533,51 +523,44 @@
     }
 
     function drawLiveGraph() {
-        const pointsToShow = 400; // About 8 seconds
-        const scaleWindow = 1000; // About 20 seconds
+        const pointsToShow = 400; 
         const data = sessionHistory.slice(-pointsToShow);
-        const scaleData = sessionHistory.slice(-scaleWindow);
         if (data.length < 2) return;
 
         ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
         
-        // Use a more robust range (ignore extreme outliers)
-        const sorted = [...scaleData].sort((a, b) => a - b);
-        const p10 = sorted[Math.floor(sorted.length * 0.1)];
-        const p90 = sorted[Math.floor(sorted.length * 0.9)];
+        // Auto-Adjusting scaling based on session history
+        const recentMin = Math.min(...data);
+        const recentMax = Math.max(...data);
         
-        const recentMin = p10;
-        const recentMax = p90;
-        const range = Math.max(0.15, recentMax - recentMin); 
-        const dataCenter = (recentMin + recentMax) / 2;
+        // Blend calibrated range with recent range for stability
+        dynamicMin = dynamicMin * 0.99 + recentMin * 0.01;
+        dynamicMax = dynamicMax * 0.99 + recentMax * 0.01;
+        
+        const range = Math.max(0.1, dynamicMax - dynamicMin); 
+        const dataCenter = (dynamicMin + dynamicMax) / 2;
         
         const scale = (canvasLive.height * 0.65) / range;
         const step = canvasLive.width / (pointsToShow - 1);
         const midY = canvasLive.height / 2;
 
-        // Draw Guide Wave (Goal Path)
+        // Draw Guide Wave
         ctxLive.beginPath();
         ctxLive.strokeStyle = 'rgba(255, 255, 255, 0.15)';
         ctxLive.setLineDash([5, 5]);
         ctxLive.lineWidth = 2 * window.devicePixelRatio;
-        
         const elapsed = (Date.now() - startTime) / 1000;
-        const pointTimeStep = 1 / SAMPLE_RATE; 
-
         for (let i = 0; i < pointsToShow; i++) {
-            const timeAtPoint = elapsed - (pointsToShow - i) * pointTimeStep;
+            const timeAtPoint = elapsed - (pointsToShow - i) * (1/SAMPLE_RATE);
             const cycleTime = (timeAtPoint % 16 + 16) % 16;
             let goalY = 0;
-            
             if (cycleTime < 4) goalY = -1 + (cycleTime / 4) * 2;
             else if (cycleTime < 8) goalY = 1;
             else if (cycleTime < 12) goalY = 1 - ((cycleTime - 8) / 4) * 2;
             else goalY = -1;
-
             const x = i * step;
             const y = midY - goalY * (canvasLive.height * 0.3);
-            if (i === 0) ctxLive.moveTo(x, y);
-            else ctxLive.lineTo(x, y);
+            if (i === 0) ctxLive.moveTo(x, y); else ctxLive.lineTo(x, y);
         }
         ctxLive.stroke();
         ctxLive.setLineDash([]);
@@ -587,7 +570,6 @@
         ctxLive.strokeStyle = '#38bdf8';
         ctxLive.lineWidth = 3 * window.devicePixelRatio;
         ctxLive.lineJoin = 'round';
-        
         const offset = pointsToShow - data.length;
         ctxLive.moveTo(offset * step, midY - (data[0] - dataCenter) * scale);
         for (let i = 1; i < data.length; i++) {
@@ -600,23 +582,17 @@
         resizeCanvas();
         ctxSummary.clearRect(0, 0, canvasSummary.width, canvasSummary.height);
         if (sessionHistory.length < 2) return;
-
         const minVal = Math.min(...sessionHistory);
         const maxVal = Math.max(...sessionHistory);
         const range = Math.max(0.1, maxVal - minVal);
         const dataCenter = (minVal + maxVal) / 2;
-        
         const scale = (canvasSummary.height * 0.7) / range;
         const step = canvasSummary.width / (sessionHistory.length - 1);
         const midY = canvasSummary.height / 2;
-
         ctxSummary.beginPath();
         ctxSummary.strokeStyle = 'rgba(148, 163, 184, 0.2)';
-        ctxSummary.lineWidth = 1 * window.devicePixelRatio;
-        ctxSummary.moveTo(0, midY);
-        ctxSummary.lineTo(canvasSummary.width, midY);
+        ctxSummary.moveTo(0, midY); ctxSummary.lineTo(canvasSummary.width, midY);
         ctxSummary.stroke();
-
         ctxSummary.beginPath();
         ctxSummary.strokeStyle = '#38bdf8';
         ctxSummary.lineWidth = 2 * window.devicePixelRatio;
@@ -627,8 +603,12 @@
         ctxSummary.stroke();
     }
 
+    btnRestart.addEventListener('click', () => {
+        summaryView.classList.add('hidden');
+        setupView.classList.remove('hidden');
+    });
+
 </script>
 
 </body>
 </html>
-
