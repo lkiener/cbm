@@ -189,7 +189,7 @@
 <div class="container" id="setup-view">
     <h1>Breath Monitor</h1>
     <p class="subtitle">iPhone 17 Chest Movement Sensor</p>
-    
+
     <div class="card">
         <div class="instruction-box">
             <p>1. Lie flat on your back.</p>
@@ -198,31 +198,31 @@
                 <p>4. Bottom of phone resting on your chest.</p>
         </div>
     </div>
-    
+
     <button id="btn-start">Start Session</button>
 </div>
 
 <div class="container hidden" id="monitor-view">
     <div class="status-badge" id="status-text">CALIBRATING...</div>
-    
+
     <div class="card">
         <div class="timer" id="timer-text">0:00</div>
         <div class="bpm-display" id="bpm-text">BPM: --</div>
         <div class="breath-indicator" id="breath-led"></div>
-        
+
         <div class="graph-container">
             <div class="graph-label">Live Movement</div>
             <canvas id="breath-chart-live"></canvas>
         </div>
     </div>
-    
+
     <button id="btn-stop" style="background-color: var(--error);">Stop</button>
 </div>
 
 <div class="container hidden" id="summary-view">
     <h1>Summary</h1>
     <p class="subtitle">Session Complete</p>
-    
+
     <div class="card">
         <div class="summary-grid">
             <div class="stat-box">
@@ -234,7 +234,7 @@
                 <div class="stat-value" id="res-bpm">0.0</div>
             </div>
         </div>
-        
+
         <div class="graph-container" style="margin-top: 1.5rem;">
             <div class="graph-label">Session Waveform</div>
             <canvas id="breath-chart"></canvas>
@@ -245,7 +245,7 @@
             <div class="stat-value" id="res-duration">60s</div>
         </div>
     </div>
-    
+
     <button id="btn-restart">New Session</button>
 </div>
 
@@ -269,7 +269,7 @@
     let isRising = false;
     let peakValue = -Infinity;
     let troughValue = Infinity;
-    
+
     // UI Elements
     const setupView = document.getElementById('setup-view');
     const monitorView = document.getElementById('monitor-view');
@@ -281,10 +281,10 @@
     const statusText = document.getElementById('status-text');
     const bpmText = document.getElementById('bpm-text');
     const breathLed = document.getElementById('breath-led');
-    
+
     const canvasSummary = document.getElementById('breath-chart');
     const ctxSummary = canvasSummary.getContext('2d');
-    
+
     const canvasLive = document.getElementById('breath-chart-live');
     const ctxLive = canvasLive.getContext('2d');
 
@@ -369,14 +369,14 @@
         breathIntervals = [];
         peakValue = -Infinity;
         troughValue = Infinity;
-        
+
         setupView.classList.add('hidden');
         monitorView.classList.remove('hidden');
         statusText.textContent = 'CALIBRATING...';
         statusText.style.color = 'var(--accent)';
-        
+
         window.addEventListener('devicemotion', handleMotion);
-        
+
         timerInterval = setInterval(updateUI, 100);
     }
 
@@ -388,10 +388,10 @@
         // The Y axis (long axis of phone) is now the most sensitive to gravity changes during tilt.
         const y = event.accelerationIncludingGravity.y || 0;
         const rawValue = y;
-        
+
         // Low Pass Filter
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
-        
+
         if (state === 'CALIBRATING') {
             samples.push(smoothedValue);
             const elapsed = (Date.now() - startTime) / 1000;
@@ -405,7 +405,7 @@
         } else if (state === 'RECORDING') {
             processBreath(smoothedValue);
             sessionHistory.push(smoothedValue - baseline);
-            
+
             const elapsed = (Date.now() - startTime) / 1000;
             if (elapsed >= SESSION_DURATION) {
                 endSession();
@@ -418,25 +418,25 @@
 
     function processBreath(val) {
         // Increased threshold to avoid noise (was 0.02)
-        const threshold = 0.04; 
+        const threshold = 0.04;
         const relativeVal = val - baseline;
-        
+
         if (relativeVal > peakValue) peakValue = relativeVal;
         if (relativeVal < troughValue) troughValue = relativeVal;
 
         if (!isRising && relativeVal > (troughValue + threshold)) {
             isRising = true;
-            troughValue = Infinity; 
-            
+            troughValue = Infinity;
+
             // Visual feedback for start of inhale
             breathLed.classList.add('active');
         } else if (isRising && relativeVal < (peakValue - threshold)) {
             isRising = false;
-            peakValue = -Infinity; 
+            peakValue = -Infinity;
             breathLed.classList.remove('active');
-            
+
             breathCount++;
-            
+
             const now = Date.now();
             if (lastPeakTime > 0) {
                 const duration = now - lastPeakTime;
@@ -445,7 +445,7 @@
                 if (duration > 1500 && duration < 12000) {
                     breathIntervals.push(duration);
                     if (breathIntervals.length > 8) breathIntervals.shift();
-                    
+
                     const avgInterval = breathIntervals.reduce((a, b) => a + b, 0) / breathIntervals.length;
                     const bpm = 60000 / avgInterval;
                     bpmText.textContent = `BPM: ${bpm.toFixed(1)}`;
@@ -475,10 +475,10 @@
         window.removeEventListener('devicemotion', handleMotion);
         clearInterval(timerInterval);
         playBeep();
-        
+
         monitorView.classList.add('hidden');
         summaryView.classList.remove('hidden');
-        
+
         const actualDurationMs = Date.now() - startTime;
         const actualDurationSec = actualDurationMs / 1000;
 
@@ -492,7 +492,7 @@
 
         document.getElementById('res-total').textContent = breathCount;
         document.getElementById('res-bpm').textContent = finalAvgBpm;
-        
+
         const actualDuration = Math.round((Date.now() - startTime) / 1000);
         document.getElementById('res-duration').textContent = actualDuration + 's';
 
@@ -506,7 +506,7 @@
         if (data.length < 2) return;
 
         ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
-        
+
         const maxVal = Math.max(...data.map(Math.abs));
         const scale = (canvasLive.height * 0.4) / (maxVal || 0.01);
         const step = canvasLive.width / (pointsToShow - 1);
@@ -523,7 +523,7 @@
         ctxLive.strokeStyle = '#38bdf8';
         ctxLive.lineWidth = 3 * window.devicePixelRatio;
         ctxLive.lineJoin = 'round';
-        
+
         const offset = pointsToShow - data.length;
         ctxLive.moveTo(offset * step, midY - data[0] * scale);
         for (let i = 1; i < data.length; i++) {
@@ -535,7 +535,7 @@
     function drawFinalGraph() {
         resizeCanvas();
         ctxSummary.clearRect(0, 0, canvasSummary.width, canvasSummary.height);
-        
+
         if (sessionHistory.length < 2) return;
 
         const maxVal = Math.max(...sessionHistory.map(Math.abs));
@@ -554,7 +554,7 @@
         ctxSummary.strokeStyle = '#38bdf8';
         ctxSummary.lineWidth = 2 * window.devicePixelRatio;
         ctxSummary.lineJoin = 'round';
-        
+
         ctxSummary.moveTo(0, midY - sessionHistory[0] * scale);
         for (let i = 1; i < sessionHistory.length; i++) {
             ctxSummary.lineTo(i * step, midY - sessionHistory[i] * scale);
