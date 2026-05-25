@@ -283,6 +283,10 @@
     let peakValue = -Infinity;
     let troughValue = Infinity;
     
+    // Dynamic scaling for the live graph
+    let liveMin = Infinity;
+    let liveMax = -Infinity;
+    
     // UI Elements
     const setupView = document.getElementById('setup-view');
     const monitorView = document.getElementById('monitor-view');
@@ -383,6 +387,8 @@
         breathIntervals = [];
         peakValue = -Infinity;
         troughValue = Infinity;
+        liveMin = Infinity;
+        liveMax = -Infinity;
         
         setupView.classList.add('hidden');
         monitorView.classList.remove('hidden');
@@ -399,9 +405,14 @@
 
         // When standing on chest, screen facing head:
         // Inhaling (chest rising) causes the phone to tilt.
-        // The Y axis (long axis of phone) is now the most sensitive to gravity changes during tilt.
+        // On iPhone, a 'chin-wards' tilt usually decreases Y or increases it depending on gravity.
+        // We'll normalize this by tracking the range and allowing auto-scaling.
         const y = event.accelerationIncludingGravity.y || 0;
-        const rawValue = y;
+        
+        // INVERSION FIX: 
+        // Based on your screenshot, inhaling is currently moving the line DOWN.
+        // We invert the raw value so that chest expansion moves the graph UP.
+        const rawValue = -y; 
         
         // Low Pass Filter
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
@@ -538,8 +549,18 @@
 
         ctxLive.clearRect(0, 0, canvasLive.width, canvasLive.height);
         
-        const maxVal = Math.max(...data.map(Math.abs));
-        const scale = (canvasLive.height * 0.4) / (maxVal || 0.1);
+        // Dynamic Range Tracking for Auto-Scaling
+        const recentMin = Math.min(...data);
+        const recentMax = Math.max(...data);
+        
+        // Smoothly expand the tracked range
+        if (recentMin < liveMin) liveMin = liveMin * 0.9 + recentMin * 0.1;
+        if (recentMax > liveMax) liveMax = liveMax * 0.9 + recentMax * 0.1;
+        
+        // Ensure we have a minimum range to avoid flatline scaling
+        const range = Math.max(0.1, liveMax - liveMin);
+        const scale = (canvasLive.height * 0.7) / range;
+        
         const step = canvasLive.width / (pointsToShow - 1);
         const midY = canvasLive.height / 2;
 
@@ -585,9 +606,11 @@
         ctxLive.lineJoin = 'round';
         
         const offset = pointsToShow - data.length;
-        ctxLive.moveTo(offset * step, midY - data[0] * scale);
+        const dataCenter = (liveMin + liveMax) / 2;
+
+        ctxLive.moveTo(offset * step, midY - (data[0] - dataCenter) * scale);
         for (let i = 1; i < data.length; i++) {
-            ctxLive.lineTo((i + offset) * step, midY - data[i] * scale);
+            ctxLive.lineTo((i + offset) * step, midY - (data[i] - dataCenter) * scale);
         }
         ctxLive.stroke();
     }
