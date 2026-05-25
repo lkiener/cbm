@@ -210,7 +210,7 @@
 
 <div class="container" id="setup-view">
     <h1>Breath Monitor</h1>
-    <p class="subtitle">Standing Chest Sensor</p>
+    <p class="subtitle">Linear Acceleration Sensor</p>
     
     <div class="card">
         <div class="instruction-box">
@@ -226,14 +226,14 @@
 <div class="container hidden" id="calib-view">
     <h1 id="calib-title">Calibration</h1>
     <div class="card">
-        <div class="calib-step" id="calib-instruction">Exhale fully and tap</div>
+        <div class="calib-step" id="calib-instruction">Breathe deeply for 5s</div>
         <div class="graph-container preview-mini">
-            <div class="graph-label">Real-time Preview</div>
+            <div class="graph-label">Real-time Movement</div>
             <canvas id="calib-preview"></canvas>
         </div>
-        <div class="instruction-box" id="calib-sub">Ensure inhalation moves the line UP.</div>
+        <div class="instruction-box" id="calib-sub">We are measuring your breath strength.</div>
     </div>
-    <button id="btn-calib-next">TAP NOW</button>
+    <button id="btn-calib-next" disabled>WAITING...</button>
 </div>
 
 <div class="container hidden" id="monitor-view">
@@ -290,22 +290,22 @@
     const BOX_CYCLES = 4;
     const SESSION_DURATION = PHASE_DURATION * 4 * BOX_CYCLES; // 64 seconds
     const SAMPLE_RATE = 50;
+    const CALIB_DUR = 5000;
 
     // State
-    let state = 'IDLE'; // IDLE, CALIB_EXHALE, CALIB_INHALE, RECORDING, FINISHED
+    let state = 'IDLE'; // IDLE, CALIBRATING, RECORDING, FINISHED
     let startTime = 0;
     let timerInterval = null;
     let sessionHistory = []; 
     let calibHistory = [];
     let smoothedValue = 0;
-    const alpha = 0.015; // Stronger low-pass filter for extreme smoothness
+    let doubleSmoothed = 0;
+    const alpha = 0.015; // Extreme smoothing
     
     // Calibration Values
-    let calibMin = 0; // Exhale point
-    let calibMax = 0; // Inhale point
-    let currentRange = 0.5; 
-    let dynamicMin = 0;
-    let dynamicMax = 0;
+    let currentRange = 0.1; 
+    let dynamicMin = -0.1;
+    let dynamicMax = 0.1;
 
     // Breath Detection
     let isMovingUp = false;
@@ -383,42 +383,43 @@
         if (typeof DeviceMotionEvent.requestPermission === 'function') {
             try {
                 const permission = await DeviceMotionEvent.requestPermission();
-                if (permission === 'granted') enterExhaleCalib();
+                if (permission === 'granted') startCalib();
                 else alert('Permission denied.');
             } catch (e) { alert('Error: ' + e); }
         } else {
-            enterExhaleCalib();
+            startCalib();
         }
     });
 
-    function enterExhaleCalib() {
-        state = 'CALIB_EXHALE';
+    function startCalib() {
+        state = 'CALIBRATING';
         setupView.classList.add('hidden');
         calibView.classList.remove('hidden');
-        calibInstruction.textContent = "Exhale fully and tap";
+        startTime = Date.now();
+        calibHistory = [];
         resizeCanvas();
         window.addEventListener('devicemotion', handleMotion);
+        
+        let calibInt = setInterval(() => {
+            const elapsed = Date.now() - startTime;
+            if (elapsed >= CALIB_DUR) {
+                clearInterval(calibInt);
+                btnCalibNext.disabled = false;
+                btnCalibNext.textContent = "START SESSION";
+                
+                const min = Math.min(...calibHistory);
+                const max = Math.max(...calibHistory);
+                currentRange = Math.max(0.05, max - min);
+                dynamicMin = min;
+                dynamicMax = max;
+            } else {
+                btnCalibNext.textContent = `CALIBRATING (${Math.ceil((CALIB_DUR - elapsed)/1000)}s)`;
+            }
+        }, 100);
     }
 
     btnCalibNext.addEventListener('click', () => {
-        if (state === 'CALIB_EXHALE') {
-            calibMin = smoothedValue;
-            state = 'CALIB_INHALE';
-            calibInstruction.textContent = "Inhale fully and tap";
-            calibInstruction.style.color = "var(--success)";
-        } else if (state === 'CALIB_INHALE') {
-            calibMax = smoothedValue;
-            // Ensure min < max
-            if (calibMin > calibMax) {
-                let temp = calibMin;
-                calibMin = calibMax;
-                calibMax = temp;
-            }
-            currentRange = Math.max(0.2, calibMax - calibMin);
-            dynamicMin = calibMin;
-            dynamicMax = calibMax;
-            startSession();
-        }
+        startSession();
     });
 
     function startSession() {
@@ -439,20 +440,23 @@
     }
 
     function handleMotion(event) {
-        if (!event.accelerationIncludingGravity) return;
-        const y = event.accelerationIncludingGravity.y || 0;
-        const rawValue = y; 
+        if (!event.acceleration) return;
+        const y = event.acceleration.y || 0;
+        const rawValue = -y; // Swapped: Chest rising (pos Y) now moves graph DOWN
         
         if (smoothedValue === 0) smoothedValue = rawValue;
         smoothedValue = (alpha * rawValue) + (1 - alpha) * smoothedValue;
+        doubleSmoothed = (alpha * smoothedValue) + (1 - alpha) * doubleSmoothed;
         
-        if (state === 'CALIB_EXHALE' || state === 'CALIB_INHALE') {
-            calibHistory.push(smoothedValue);
+        const val = doubleSmoothed;
+
+        if (state === 'CALIBRATING') {
+            calibHistory.push(val);
             if (calibHistory.length > 200) calibHistory.shift();
             drawPreviewGraph();
         } else if (state === 'RECORDING') {
-            processBreath(smoothedValue);
-            sessionHistory.push(smoothedValue);
+            processBreath(val);
+            sessionHistory.push(val);
             
             const elapsed = (Date.now() - startTime) / 1000;
             if (elapsed >= SESSION_DURATION) endSession();
@@ -543,7 +547,7 @@
         ctxPreview.clearRect(0, 0, canvasPreview.width, canvasPreview.height);
         const min = Math.min(...calibHistory);
         const max = Math.max(...calibHistory);
-        const range = Math.max(0.1, max - min);
+        const range = Math.max(0.05, max - min);
         const scale = (canvasPreview.height * 0.7) / range;
         const step = canvasPreview.width / (calibHistory.length - 1);
         const midY = canvasPreview.height / 2;
@@ -572,7 +576,7 @@
         dynamicMin = dynamicMin * 0.99 + recentMin * 0.01;
         dynamicMax = dynamicMax * 0.99 + recentMax * 0.01;
         
-        const range = Math.max(0.1, dynamicMax - dynamicMin); 
+        const range = Math.max(0.05, dynamicMax - dynamicMin); 
         const dataCenter = (dynamicMin + dynamicMax) / 2;
         
         const scale = (canvasLive.height * 0.65) / range;
@@ -618,7 +622,7 @@
         if (sessionHistory.length < 2) return;
         const minVal = Math.min(...sessionHistory);
         const maxVal = Math.max(...sessionHistory);
-        const range = Math.max(0.1, maxVal - minVal);
+        const range = Math.max(0.05, maxVal - minVal);
         const center = (minVal + maxVal) / 2;
         const scale = (canvasSummary.height * 0.7) / range;
         const step = canvasSummary.width / (sessionHistory.length - 1);
@@ -643,3 +647,4 @@
 
 </body>
 </html>
+
